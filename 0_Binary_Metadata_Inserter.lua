@@ -873,6 +873,98 @@ local function ParseTIFF(reader, tiff_start, results, initial_table, initial_con
     ReadIFD(ifd_offset, initial_table or STANDARD_EXIF_TAGS, initial_context or "Root", 0)
 end
 
+local function ScanNRAWFile(path)
+    local r = BinaryReader.new(path)
+    if not r then return {} end
+    
+    local NRAW_TAGS_MAP = {
+        [0x0002] = {key = "Model", name = "モデル"},
+        [0x0003] = {key = "Firmware", name = "ファームウェア"},
+        [0x0005] = {key = "WhiteBalanceTemperature", name = "ホワイトバランス"},
+    }
+    
+    local results = {}
+    local sig = string.char(0x4E, 0x43, 0x54, 0x47) -- "NCTG"
+    local idx = r:find(sig)
+    if not idx then return {} end
+    
+    local pos = idx + 4
+    while pos < #r.data - 8 do
+        r:seek(pos)
+        r:set_endian(false)
+        local header = r:u16()
+        
+        if header == 0x0110 or header == 0x0210 or header == 0x0200 then
+            local tag = r:u16()
+            local type_ = r:u16()
+            local count = r:u16()
+            
+            if type_ < 1 or type_ > 12 or count > 512 then
+                pos = pos + 1
+            else
+                local data_size = 0
+                if type_ == 1 or type_ == 2 or type_ == 7 then data_size = count
+                elseif type_ == 3 then data_size = count * 2
+                elseif type_ == 4 or type_ == 9 then data_size = count * 4
+                elseif type_ == 5 or type_ == 10 then data_size = count * 8
+                else data_size = count end
+                
+                local start_data = r.pos
+                if start_data + data_size - 1 > #r.data then
+                     pos = pos + 1
+                else
+                    local val = nil
+                    if type_ == 2 then
+                        if data_size > 0 then
+                            val = r.data:sub(r.pos, r.pos + data_size - 1):gsub("[%z%s]+$", "")
+                        end
+                    elseif type_ == 5 or type_ == 10 then
+                        local n = r:u32()
+                        local d = r:u32()
+                        local def = NRAW_TAGS_MAP[tag] or STANDARD_EXIF_TAGS[tag]
+                        if def and def.fmt and Formatters[def.fmt] then val = Formatters[def.fmt](n, d)
+                        else val = Formatters.fraction_reduce(n, d) end
+                    elseif type_ == 3 or type_ == 8 then
+                        val = count > 1 and "Array" or r:u16()
+                    elseif type_ == 4 or type_ == 9 then
+                        val = count > 1 and "Array" or r:u32()
+                    end
+                    
+                    local def = NRAW_TAGS_MAP[tag] or STANDARD_EXIF_TAGS[tag]
+                    if def and def.key and val then
+                        results[def.key] = {label = def.name, value = val, prio = 1}
+                    end
+                    pos = start_data + data_size
+                end
+            end
+        else
+            pos = pos + 1
+        end
+    end
+    
+    -- 3. Scrape static strings for Model (Nikon NEV specific focus)
+    if idx and path:lower():match("%.nev$") then
+        local chunk = r.data:sub(idx + 4, math.min(#r.data, idx + 4096))
+        local m_maker, m_model = chunk:match("(NIKON)%s+(Z%s-[A-Za-z0-9_]+)")
+        if m_maker and m_model then
+            local val = (m_maker .. " " .. m_model):gsub("[%z]+$", ""):gsub("%s+$", "")
+            if #val > 6 and #val < 32 then
+                results["Model"] = {label = "モデル", value = val, prio = 2}
+            end
+        else
+            local model_only = chunk:match("(NIKON%s+Z%s-[A-Za-z0-9_]+)")
+            if model_only then
+                 local val = model_only:gsub("[%z]+$", ""):gsub("%s+$", "")
+                 if #val > 6 and #val < 32 then
+                     results["Model"] = {label = "モデル", value = val, prio = 2}
+                 end
+            end
+        end
+    end
+    
+    return results
+end
+
 local function ScanFile(path)
     local r = BinaryReader.new(path)
     if not r then return {} end
@@ -1346,7 +1438,13 @@ function win.On.BtnLoad.Clicked(ev)
     itm.LblStatus.Text = "Scanning..."
     
     local ex_data = {}
-    if path ~= "" then ex_data = ScanFile(path) end
+    if path ~= "" then 
+        if path:lower():match("%.nev$") or path:lower():match("%.r3d$") then
+            ex_data = ScanNRAWFile(path)
+        else
+            ex_data = ScanFile(path)
+        end
+    end
     
     display_data = {}
     local found_data_map = {}
@@ -1391,6 +1489,19 @@ function win.On.BtnLoad.Clicked(ev)
             end
         end
     end
+    -- 1.5. Gather remaining items from ex_data (for NRAW/custom tags)
+    for k, data in pairs(ex_data) do
+        if not found_data_map[k] then
+            local item = {
+                label = data.label or k,
+                value = data.value,
+                id_str = k,
+                checked = preferred_keys[k] or false
+            }
+            if k == "Model" or k == "WhiteBalanceTemperature" then item.checked = true end
+            found_data_map[k] = item
+        end
+    end
     
     -- 2. Gather from API for remaining/missing fields - Fallback Role
     if mediaItem then
@@ -1398,11 +1509,9 @@ function win.On.BtnLoad.Clicked(ev)
         if type(props) == "table" then
             for k, val in pairs(props) do
                 if val and val ~= "" then
-                    local api_key = k -- 用途統合のためプレフィックスを排除
-                    
-                    if not found_data_map[api_key] then
+                    local api_key = "API_" .. k
+                    if not found_data_map[api_key] and not found_data_map[k] then
                         local lbl = k
-                        -- 既存の API_PROPS から日本語ラベルを探す
                         for _, p in ipairs(API_PROPS) do
                             if p.key == k then lbl = p.name; break end
                         end
@@ -1421,20 +1530,20 @@ function win.On.BtnLoad.Clicked(ev)
         else
             -- フォールバック
             for _, prop in ipairs(API_PROPS) do
-                if not found_data_map[prop.key] then
+                local api_key = "API_" .. prop.key
+                if not found_data_map[api_key] and not found_data_map[prop.key] then
                     local val = mediaItem:GetClipProperty(prop.key)
                     if val and val ~= "" then
-                        local k = prop.key
                         local lbl = prop.name
                         if itm.ChkEnglish.Checked then lbl = prop.name_en or prop.key end
                         
                         local item = {
                             label = lbl,
                             value = val,
-                            id_str = k,
+                            id_str = api_key,
                             checked = true
                         }
-                        found_data_map[k] = item
+                        found_data_map[api_key] = item
                     end
                 end
             end
@@ -1800,7 +1909,11 @@ function win.On.BtnWrite.Clicked(ev)
             if file_cache[path] then
                 ex_data = file_cache[path]
             else
-                ex_data = ScanFile(path)
+                if path:lower():match("%.nev$") or path:lower():match("%.r3d$") then
+                    ex_data = ScanNRAWFile(path)
+                else
+                    ex_data = ScanFile(path)
+                end
                 file_cache[path] = ex_data
             end
         end
