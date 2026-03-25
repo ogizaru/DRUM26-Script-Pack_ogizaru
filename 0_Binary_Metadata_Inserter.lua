@@ -1086,6 +1086,7 @@ local win = disp:AddWindow({
                  Weight = 0,
                  ui:Button{ID = "BtnSelectAll", Text = "全選択", Weight = 1},
                  ui:Button{ID = "BtnSelectNone", Text = "全解除", Weight = 1},
+                 ui:Button{ID = "BtnSortChecked", Text = "選択項目を上へ", Weight = 1},
             },
             ui:VGap(4),
         },
@@ -1152,6 +1153,7 @@ local ui_items = {}
 local loaded_config = LoadConfig()
 local current_presets = loaded_config.presets
 local current_options = loaded_config.options
+loaded_config.last_state = {}
 
 -- Init Options
 if current_options.pad_width then itm.ChkPadding.Checked = true end
@@ -1779,11 +1781,29 @@ function win.On.BtnSelectNone.Clicked(ev)
     RefreshTree()
 end
 
+function win.On.BtnSortChecked.Clicked(ev)
+    SyncCheckStates()
+    local checked = {}
+    local unchecked = {}
+    for _, d in ipairs(display_data) do
+        if d.checked then
+            table.insert(checked, d)
+        else
+            table.insert(unchecked, d)
+        end
+    end
+    display_data = {}
+    for _, d in ipairs(checked) do table.insert(display_data, d) end
+    for _, d in ipairs(unchecked) do table.insert(display_data, d) end
+    RefreshTree()
+    itm.LblStatus.Text = "Sorted Checked Items"
+end
+
 function win.On.BtnClose.Clicked(ev) 
     SyncCheckStates()
     current_options.pad_width = (itm.ChkPadding.Checked == "Checked") or itm.ChkPadding.Checked
     current_options.use_english = (itm.ChkEnglish.Checked == "Checked") or itm.ChkEnglish.Checked
-    SaveConfig(display_data, current_presets, current_options)
+    SaveConfig({}, current_presets, current_options)
     disp:ExitLoop() 
 end
 
@@ -1974,7 +1994,7 @@ function win.On.BtnWrite.Clicked(ev)
                              local pad = max_lengths[i] - ulen
                              if pad > 0 then val = val .. string.rep(" ", pad) end
                         end
-                        local txt_segment = (itm.ChkLabel.Checked and (tmpl.label..": "..val)) or val
+                        local txt_segment = (itm.ChkLabel.Checked and tmpl.id_str ~= "CUSTOM" and (tmpl.label..": "..val)) or val
                         table.insert(lines, txt_segment)
                     end
                 end
@@ -2040,7 +2060,7 @@ function win.On.MyWin.Close(ev)
     SyncCheckStates()
     current_options.pad_width = (itm.ChkPadding.Checked == "Checked") or itm.ChkPadding.Checked
     current_options.use_english = (itm.ChkEnglish.Checked == "Checked") or itm.ChkEnglish.Checked
-    SaveConfig(display_data, current_presets, current_options)
+    SaveConfig({}, current_presets, current_options)
     disp:ExitLoop()
 end
 
