@@ -132,7 +132,7 @@ end
 if not __install_this_script__() then return end
 -- ============================================================================
 --[[
-    Resolve Exif & Metadata Importer v1.0.0
+    Resolve Exif & Metadata Importer v1.0.3
     Author: OGIZARU & DaVinci Resolve Addon and DCTL maker V3 (Custom Gem)
     Description: Reads EXIF & API Metadata. Default output is HORIZONTAL (single line).
     Target: DaVinci Resolve Studio / Free 17+
@@ -278,10 +278,18 @@ local MAKERNOTE_TAGS = {
     Olympus = {
         [0x0104] = {name = "ボディーファームウェア", name_en = "Body Firmware", key = "BodyFirmwareVersion", fmt = "om_firmware"},
         [0x0203] = {name = "レンズモデル", name_en = "Lens Model", key = "LensModel"},
-        [0x0301] = {name = "フォーカスモード", name_en = "Focus Mode", key = "FocusMode", fmt = "focus_mode_legacy"}, 
         [0x2010] = {name = "Equipment"}, 
-        [0x2020] = {name = "ImageProcessing"}, 
+        [0x2020] = {name = "CameraSettings"}, 
+        [0x2030] = {name = "RawDevelopment"}, 
+        [0x2031] = {name = "RawDevelopment2"}, 
+        [0x2040] = {name = "ImageProcessing"}, 
         [0x2050] = {name = "FocusInfo"}, 
+    },
+    OlympusCS = {
+        [0x0301] = {name = "フォーカスモード", name_en = "Focus Mode", key = "FocusMode", fmt = "focus_mode_legacy"}, 
+    },
+    OlympusRD2 = {
+        [0x0126] = {name = "ハイライトシャドウコントロール", name_en = "Highlight & Shadow Control", key = "HighlightShadowControl", fmt = "om_tone_control"},
     },
     OlympusEq = {
         [0x0301] = {name = "フォーカスモード", name_en = "Focus Mode", key = "FocusMode", fmt = "focus_mode_legacy"}, 
@@ -299,6 +307,10 @@ local MAKERNOTE_TAGS = {
         [0x0526] = {name = "調色", name_en = "Picture Mode Tone", key = "PictureModeTone", map = {[0]="なし",[1]="ニュートラル",[2]="セピア",[3]="青",[4]="紫",[5]="緑"}},
         [0x0527] = {name = "ノイズフィルター", name_en = "Noise Filter", key = "NoiseFilter", fmt = "om_noise_filter"},
         [0x0529] = {name = "アートフィルター", name_en = "Art Filter", key = "ArtFilter", fmt = "om_art_filter"},
+        [0x052b] = {name = "ハイライトコントロール(旧)", name_en = "Highlight Control (Legacy)"},
+        [0x052c] = {name = "シャドウコントロール(旧)", name_en = "Shadow Control (Legacy)"},
+        [0x052d] = {name = "ミッドトーンコントロール(旧)", name_en = "Midtone Control (Legacy)"},
+        [0x052e] = {name = "ハイライトシャドウコントロール", name_en = "Highlight & Shadow Control", key = "HighlightShadowControl", fmt = "om_tone_control"},
         [0x0537] = {name = "モノクロプロファイル設定", name_en = "Monochrome Profile Settings", key = "MonochromeProfileSettings", map = {[0]="カラーフィルターなし",[1]="黄",[2]="オレンジ",[3]="赤",[4]="マゼンタ",[5]="ブルー",[6]="シアン",[7]="緑",[8]="黄色/緑"}},
         [0x0538] = {name = "粒状効果", name_en = "Film Grain Effect", key = "FilmGrainEffect", map = {[0]="なし",[1]="低",[2]="中",[3]="高"}},
         [0x053a] = {name = "モノクロビネッティング", name_en = "Monochrome Vignetting", key = "MonochromeVignetting"},
@@ -645,6 +657,49 @@ function Formatters.om_noise_filter(val)
     return m[first] or val
 end
 
+function Formatters.om_signed_number(val)
+    if not val then return nil end
+    local n = tonumber(string.match(tostring(val), "^%-?%d+"))
+    if not n then return val end
+    if n > 0 then return "+" .. n else return tostring(n) end
+end
+
+function Formatters.om_tone_control(val)
+    if not val then return nil end
+    local s = tostring(val)
+    local h, m, sh = 0, 0, 0
+    local found = false
+    
+    if s:find(";") then
+        -- Format: Highlights; 0; -7; 7; Shadows; 0; -7; 7; Midtones; 0; -7; 7
+        local h_str = s:match("Highlights;%s*([^;]+)")
+        local sh_str = s:match("Shadows;%s*([^;]+)")
+        local m_str = s:match("Midtones;%s*([^;]+)")
+        if h_str then h = tonumber(h_str) or 0; found = true end
+        if sh_str then sh = tonumber(sh_str) or 0; found = true end
+        if m_str then m = tonumber(m_str) or 0; found = true end
+    else
+        -- Format: -31999 2 -14 14 -31998 0 -14 14 -31997 1 14 14
+        local parts = {}
+        for p in s:gmatch("%-?%d+") do table.insert(parts, tonumber(p)) end
+        for i=1, #parts-3, 4 do
+            local id = parts[i]
+            local v  = parts[i+1]
+            if id == -31999 then h = v; found = true
+            elseif id == -31998 then sh = v; found = true
+            elseif id == -31997 then m = v; found = true
+            end
+        end
+    end
+    
+    if not found then return nil end
+    
+    local function fmt_val(n)
+        return (n > 0 and "+" or "") .. n
+    end
+    return string.format("(%s,%s,%s)", fmt_val(h), fmt_val(m), fmt_val(sh))
+end
+
 -- EXIF Parser
 local function ParseTIFF(reader, tiff_start, results, initial_table, initial_context, root_tiff_start, depth, visited)
     if not root_tiff_start then root_tiff_start = tiff_start end
@@ -827,7 +882,10 @@ local function ParseTIFF(reader, tiff_start, results, initial_table, initial_con
                 local next_table = tag_table
                 local next_context = vendor_context
                 if tag == 0x2010 then next_table = MAKERNOTE_TAGS.OlympusEq; next_context = "Equipment"
-                elseif tag == 0x2020 then next_table = MAKERNOTE_TAGS.OlympusIP; next_context = "ImageProcessing"
+                elseif tag == 0x2020 then next_table = MAKERNOTE_TAGS.OlympusCS; next_context = "CameraSettings"
+                elseif tag == 0x2030 then next_table = MAKERNOTE_TAGS.OlympusRD; next_context = "RawDevelopment"
+                elseif tag == 0x2031 then next_table = MAKERNOTE_TAGS.OlympusRD2; next_context = "RawDevelopment"
+                elseif tag == 0x2040 then next_table = MAKERNOTE_TAGS.OlympusIP; next_context = "ImageProcessing"
                 elseif tag == 0x2050 then next_table = MAKERNOTE_TAGS.OlympusFI; next_context = "FocusInfo"
                 end
                 -- IFD offsets in Olympus MakerNotes are relative to mn_base
@@ -858,8 +916,8 @@ local function ParseTIFF(reader, tiff_start, results, initial_table, initial_con
             if tag == 0x0804 then val = Formatters.stacked_image(val) end
             
             if def and def.key and val then
-                -- IFD Priority: ImageProcessing(3) > Equipment(2) > Root(1)
-                local priorities = { ["Root"]=1, ["Equipment"]=2, ["ImageProcessing"]=3, ["FocusInfo"]=4 }
+                -- IFD Priority: RawDevelopment(4) > ImageProcessing(3) > CameraSettings(2) > Equipment(2) > Root(1)
+                local priorities = { ["Root"]=1, ["Equipment"]=2, ["CameraSettings"]=2, ["RawDevelopment"]=4, ["ImageProcessing"]=3, ["FocusInfo"]=5 }
                 local context_p = priorities[vendor_context] or 0
                 local current = results[def.key]
                 
