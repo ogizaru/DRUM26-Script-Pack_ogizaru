@@ -125,7 +125,7 @@ if not __install_this_script__():
 # -*- coding: utf-8 -*-
 
 """
-Script Name: Web_Image_Loader (WIL) v1.0
+Script Name: Web_Image_Loader (WIL) v1.0.1
 Description: Web上の画像をURLから直接ダウンロードし、タイムラインの再生ヘッド位置に配置します。
 Author: DaVinci Resolve Addon and DCTL maker V3 & OGIZARU
 """
@@ -166,14 +166,26 @@ def ensure_cache_dir():
             return False
     return True
 
-def get_safe_filename(url):
-    """URLから安全かつ一意なファイル名を生成する"""
+def get_safe_filename(url, content_type=None):
+    """URLとContent-Typeから安全かつ一意なファイル名を生成する"""
     parsed = urllib.parse.urlparse(url)
     domain = parsed.netloc.replace('.', '_')
     path = parsed.path
-    ext = os.path.splitext(path)[1]
+    
+    # 拡張子の決定
+    ext = os.path.splitext(path)[1].lower()
+    
+    # Content-Typeから拡張子を補完
+    if content_type:
+        ct = content_type.lower()
+        if 'image/png' in ct: ext = '.png'
+        elif 'image/jpeg' in ct or 'image/jpg' in ct: ext = '.jpg'
+        elif 'image/gif' in ct: ext = '.gif'
+        elif 'image/webp' in ct: ext = '.webp'
+        elif 'image/bmp' in ct: ext = '.bmp'
+
     if not ext or len(ext) > 5:
-        ext = ".jpg"
+        ext = ".jpg" # デフォルト
     
     url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:8]
     timestamp = int(time.time())
@@ -188,16 +200,43 @@ def download_image(url):
     if not ensure_cache_dir():
         return None
 
-    save_path = get_safe_filename(url)
+    # Headers to mimic a browser
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
+    req = urllib.request.Request(url, headers=headers)
+
     try:
         print(f"Downloading: {url}")
-        with urllib.request.urlopen(url, context=ctx) as response, open(save_path, 'wb') as out_file:
-            out_file.write(response.read())
-        print(f"Saved to: {save_path}")
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
+            if response.getcode() != 200:
+                print(f"HTTP Error: {response.getcode()}")
+                return None
+            
+            content_type = response.info().get_content_type()
+            save_path = get_safe_filename(url, content_type)
+            
+            data = response.read()
+            if not data or len(data) < 100:
+                print(f"Download Error: Content too small ({len(data) if data else 0} bytes).")
+                return None
+
+            with open(save_path, 'wb') as out_file:
+                out_file.write(data)
+                out_file.flush()
+                # 確実にディスクに書き込む
+                if hasattr(os, 'fsync'):
+                    try:
+                        os.fsync(out_file.fileno())
+                    except:
+                        pass
+                        
+        print(f"Saved to: {save_path} ({len(data)} bytes)")
         return save_path
     except Exception as e:
         print(f"Download Error: {e}")

@@ -178,7 +178,7 @@ if not __install_this_script__():
     import sys; sys.exit()
 # ============================================================================
 """
-Import PDF v0.1.0 beta
+Import PDF v1.0.1
 Developed by Google Antigravity & OGIZARU
 
 Requirements:
@@ -310,7 +310,7 @@ try:
         
         pix = page.get_pixmap(matrix=mat)
         
-        out_file = os.path.join(output_dir, f"page_{i+1:03d}.{output_fmt}")
+        out_file = os.path.join(output_dir, f"{filename}_page_{i+1:03d}.{output_fmt}")
         pix.save(out_file)
         img_paths.append(out_file)
         
@@ -322,11 +322,29 @@ try:
     project = project_manager.GetCurrentProject()
     media_pool = project.GetMediaPool()
     
-    # ImportMedia takes a list of paths
+    # ImportMedia
+    added_items = []
     if img_paths:
         print("Importing to Media Pool...")
-        added_items = media_pool.ImportMedia(img_paths)
-        print(f"Imported {len(added_items) if added_items else 0} items.")
+        # Import one by one to avoid being treated as an image sequence (video clip)
+        for p in img_paths:
+            items = media_pool.ImportMedia([p])
+            if items:
+                added_items.extend(items)
+        
+        print(f"Imported {len(added_items)} items.")
+
+    # Add to Timeline
+    if added_items:
+        timeline = project.GetCurrentTimeline()
+        if not timeline:
+            print("Creating new timeline...")
+            timeline = media_pool.CreateEmptyTimeline("Imported PDF")
+        
+        if timeline:
+            print("Adding to timeline...")
+            media_pool.AppendToTimeline(added_items)
+            print("Added to timeline.")
 
 except Exception as e:
     print(f"Error during conversion or import: {e}")
